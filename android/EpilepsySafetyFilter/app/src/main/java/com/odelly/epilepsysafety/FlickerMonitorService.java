@@ -30,9 +30,9 @@ public class FlickerMonitorService extends Service {
   public static final String EXTRA_RESULT_DATA = "result_data";
   private static final String CHANNEL = "safety_monitor";
   private static final int NOTIFICATION_ID = 1001;
-
   private HandlerThread captureThread;
   private Handler captureHandler;
+  private Handler watchdogHandler;
   private MediaProjection projection;
   private VirtualDisplay virtualDisplay;
   private ImageReader imageReader;
@@ -49,16 +49,31 @@ public class FlickerMonitorService extends Service {
         .setContentTitle("Epilepsy Safety Filter")
         .setContentText("Safety monitor active")
         .setSmallIcon(android.R.drawable.ic_lock_idle_lock).build());
-    captureThread = new HandlerThread("SafetyFrameCapture");
-    captureThread.start();
+    captureThread = new HandlerThread("SafetyFrameCapture"); captureThread.start();
     captureHandler = new Handler(captureThread.getLooper());
+    watchdogHandler = new Handler(getMainLooper());
     detector = buildDetector();
     lastHeartbeat = SystemClock.elapsedRealtime();
+    watchdogHandler.postDelayed(new Runnable() {
+      @Override public void run() {
+        long age = SystemClock.elapsedRealtime() - lastHeartbeat;
+        if (captureAvailable && age > 3500L) {
+          captureAvailable = false;
+          log("watchdog_capture_timeout");
+          triggerMitigation("watchdog_capture_timeout");
+        }
+        if (getSharedPreferences("safety", 0).getBoolean("maximum_mitigation", false)
+            && !SafetyAccessibilityService.isConnected()) {
+          log("watchdog_accessibility_unavailable");
+        }
+        if (watchdogHandler != null) watchdogHandler.postDelayed(this, 2000L);
+      }
+    }, 2000L);
   }
 
   private FlickerMitigationEngine buildDetector() {
     SharedPreferences p = getSharedPreferences("safety", 0);
-    int threshold = p.getInt("flicker_threshold", p.getBoolean("maximum_mitigation", false) ? 10 : 18);
+    int threshold = Math.max(5, Math.min(100, p.getInt("flicker_threshold", 18)));
     int minHz = p.getInt("flicker_min_hz", 5);
     int maxHz = p.getInt("flicker_max_hz", 30);
     int transitions = p.getInt("flicker_transitions", 3);
@@ -71,7 +86,6 @@ public class FlickerMonitorService extends Service {
       getSharedPreferences("safety", 0).edit().putBoolean("maximum_mitigation", true).apply();
       triggerMitigation("manual_maximum");
     }
-
     if (intent != null && intent.hasExtra(EXTRA_RESULT_CODE) && intent.hasExtra(EXTRA_RESULT_DATA)) {
       int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
       Intent data = getProjectionIntent(intent);
@@ -95,20 +109,17 @@ public class FlickerMonitorService extends Service {
         @Override public void onStop() {
           captureAvailable = false;
           lastHeartbeat = SystemClock.elapsedRealtime();
+          log("projection_stopped");
           releaseCaptureResources();
         }
       }, captureHandler);
-
       WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-      DisplayMetrics dm = new DisplayMetrics();
-      wm.getDefaultDisplay().getRealMetrics(dm);
+      DisplayMetrics dm = new DisplayMetrics(); wm.getDefaultDisplay().getRealMetrics(dm);
       int width = Math.max(320, Math.min(dm.widthPixels, 1280));
       int height = Math.max(320, Math.min(dm.heightPixels, 1280));
-      int density = dm.densityDpi;
-
       imageReader = ImageReader.newInstance(width, height, ImageFormat.RGBA_8888, 2);
       imageReader.setOnImageAvailableListener(reader -> sampleLatest(reader), captureHandler);
-      virtualDisplay = projection.createVirtualDisplay("EpilepsySafetyFilter", width, height, density,
+      virtualDisplay = projection.createVirtualDisplay("EpilepsySafetyFilter", width, height, dm.densityDpi,
           DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader.getSurface(), null, captureHandler);
       captureAvailable = virtualDisplay != null;
       lastHeartbeat = SystemClock.elapsedRealtime();
@@ -129,21 +140,12 @@ public class FlickerMonitorService extends Service {
       int luma = estimateLuminance(image);
       long now = SystemClock.elapsedRealtime();
       lastHeartbeat = now;
-      if (detector.update(luma, now) && !mitigationTriggered) {
-        triggerMitigation("temporal_flicker");
-      }
-      SharedPreferences p = getSharedPreferences("safety", 0);
-      if (!p.getBoolean("maximum_mitigation", false) && mitigationTriggered && detector.getRapidTransitions() == 0) {
-        mitigationTriggered = false;
-        SafetyAccessibilityService.clearMaximumMitigation();
-      }
+      if (detector.update(luma, now) && !mitigationTriggered) triggerMitigation("temporal_flicker");
     } catch (RuntimeException e) {
       log("frame_error=" + e.getClass().getSimpleName());
       captureAvailable = false;
       triggerMitigation("frame_failure");
-    } finally {
-      if (image != null) image.close();
-    }
+    } finally { if (image != null) image.close(); }
   }
 
   private int estimateLuminance(Image image) {
@@ -151,22 +153,16 @@ public class FlickerMonitorService extends Service {
     ByteBuffer buffer = plane.getBuffer();
     int pixelStride = plane.getPixelStride();
     int rowStride = plane.getRowStride();
-    int width = image.getWidth();
-    int height = image.getHeight();
-    int stepX = Math.max(1, width / 24);
-    int stepY = Math.max(1, height / 18);
-    long sum = 0;
-    int count = 0;
+    int width = image.getWidth(), height = image.getHeight();
+    int stepX = Math.max(1, width / 24), stepY = Math.max(1, height / 18);
+    long sum = 0; int count = 0;
     for (int y = 0; y < height; y += stepY) {
       int rowBase = y * rowStride;
       for (int x = 0; x < width; x += stepX) {
         int index = rowBase + x * pixelStride;
         if (index < 0 || index + 2 >= buffer.limit()) continue;
-        int r = buffer.get(index) & 0xff;
-        int g = buffer.get(index + 1) & 0xff;
-        int b = buffer.get(index + 2) & 0xff;
-        sum += (2126L * r + 7152L * g + 722L * b) / 10000L;
-        count++;
+        int r = buffer.get(index) & 0xff, g = buffer.get(index + 1) & 0xff, b = buffer.get(index + 2) & 0xff;
+        sum += (2126L * r + 7152L * g + 722L * b) / 10000L; count++;
       }
     }
     return count == 0 ? 0 : (int) (sum / count);
@@ -174,21 +170,15 @@ public class FlickerMonitorService extends Service {
 
   private void triggerMitigation(String reason) {
     mitigationTriggered = true;
-    getSharedPreferences("safety", 0).edit()
-        .putBoolean("maximum_mitigation", true)
-        .putString("last_trigger", reason)
-        .putLong("last_trigger_time", System.currentTimeMillis())
-        .apply();
+    getSharedPreferences("safety", 0).edit().putBoolean("maximum_mitigation", true)
+        .putString("last_trigger", reason).putLong("last_trigger_time", System.currentTimeMillis()).apply();
     SafetyAccessibilityService.requestMaximumMitigation();
     log("mitigation=" + reason);
   }
 
   private void stopCapture() {
     releaseCaptureResources();
-    if (projection != null) {
-      try { projection.stop(); } catch (RuntimeException ignored) { }
-      projection = null;
-    }
+    if (projection != null) { try { projection.stop(); } catch (RuntimeException ignored) { } projection = null; }
     captureAvailable = false;
   }
 
@@ -205,6 +195,7 @@ public class FlickerMonitorService extends Service {
   public long getLastHeartbeat() { return lastHeartbeat; }
 
   @Override public void onDestroy() {
+    if (watchdogHandler != null) watchdogHandler.removeCallbacksAndMessages(null);
     stopCapture();
     if (captureThread != null) { captureThread.quitSafely(); captureThread = null; }
     super.onDestroy();
