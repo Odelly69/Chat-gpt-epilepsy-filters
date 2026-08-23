@@ -6,7 +6,7 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.graphics.ImageFormat;
+import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.Image;
@@ -117,7 +117,7 @@ public class FlickerMonitorService extends Service {
       DisplayMetrics dm = new DisplayMetrics(); wm.getDefaultDisplay().getRealMetrics(dm);
       int width = Math.max(320, Math.min(dm.widthPixels, 1280));
       int height = Math.max(320, Math.min(dm.heightPixels, 1280));
-      imageReader = ImageReader.newInstance(width, height, ImageFormat.RGBA_8888, 2);
+      imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
       imageReader.setOnImageAvailableListener(reader -> sampleLatest(reader), captureHandler);
       virtualDisplay = projection.createVirtualDisplay("EpilepsySafetyFilter", width, height, dm.densityDpi,
           DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader.getSurface(), null, captureHandler);
