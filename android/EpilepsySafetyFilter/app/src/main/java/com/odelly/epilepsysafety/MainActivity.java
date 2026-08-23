@@ -1,13 +1,16 @@
 package com.odelly.epilepsysafety;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.view.View;
+import android.net.Uri;
+import android.view.Window;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
@@ -17,6 +20,8 @@ import android.widget.TextView;
 public class MainActivity extends Activity {
   static final String PREF = "safety";
   static final int REQUEST_PROJECTION = 401;
+  static final int REQUEST_AUDIO = 402;
+  static final int REQUEST_NOTIFICATIONS = 403;
   SeekBar dim, contrast, flickerThreshold;
   Switch enabled, vibration, motion, audio;
   TextView status;
@@ -31,21 +36,27 @@ public class MainActivity extends Activity {
     TextView info = new TextView(this);
     info.setText("Rootless risk-reduction tool. It cannot guarantee seizure prevention or replace medical advice.");
     root.addView(info);
-
     status = new TextView(this); root.addView(status);
+
     enabled = new Switch(this); enabled.setText("Enable safety overlay"); root.addView(enabled);
     dim = bar("Brightness reduction", 80, root);
     contrast = bar("Contrast reduction", 60, root);
     flickerThreshold = bar("Flicker sensitivity", 18, root);
     motion = new Switch(this); motion.setText("Reduce motion / animation where possible"); root.addView(motion);
     vibration = new Switch(this); vibration.setText("Vibration-sensitive profile"); root.addView(vibration);
-    audio = new Switch(this); audio.setText("Audio/loud-pulse profile (optional; microphone permission required)"); root.addView(audio);
+    audio = new Switch(this); audio.setText("Audio/loud-pulse profile (optional)"); root.addView(audio);
 
     Button access = new Button(this); access.setText("Open Accessibility Settings");
     access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))); root.addView(access);
 
     Button capture = new Button(this); capture.setText("Authorize Screen Monitoring");
     capture.setOnClickListener(v -> requestProjection()); root.addView(capture);
+
+    Button audioButton = new Button(this); audioButton.setText("Grant Microphone + Start Audio Monitor");
+    audioButton.setOnClickListener(v -> startAudioMonitor()); root.addView(audioButton);
+
+    Button haptics = new Button(this); haptics.setText("Reduce System Touch Haptics");
+    haptics.setOnClickListener(v -> reduceSystemHaptics()); root.addView(haptics);
 
     Button safe = new Button(this); safe.setText("Maximum Safety Mode");
     safe.setOnClickListener(v -> {
@@ -54,8 +65,7 @@ public class MainActivity extends Activity {
       getSharedPreferences(PREF, 0).edit().putBoolean("maximum_mitigation", true).apply();
       SafetyAccessibilityService.requestMaximumMitigation();
       startMonitorWithMaximumMode();
-      save();
-      updateStatus();
+      save(); updateStatus();
     }); root.addView(safe);
 
     Button clear = new Button(this); clear.setText("Clear Maximum Safety Trigger");
@@ -74,6 +84,7 @@ public class MainActivity extends Activity {
     flickerThreshold.setOnSeekBarChangeListener(simple());
     load();
     setContentView(root);
+    requestNotificationPermissionIfNeeded();
     updateStatus();
   }
 
@@ -87,6 +98,34 @@ public class MainActivity extends Activity {
     if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
   }
 
+  private void startAudioMonitor() {
+    if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+      requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_AUDIO);
+      return;
+    }
+    Intent i = new Intent(this, AudioTriggerService.class);
+    if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+  }
+
+  private void reduceSystemHaptics() {
+    if (!Settings.System.canWrite(this)) {
+      Intent i = new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:" + getPackageName()));
+      startActivity(i);
+      return;
+    }
+    try {
+      Settings.System.putInt(getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 0);
+      getSharedPreferences("safety", 0).edit().putBoolean("haptics_reduced", true).apply();
+      updateStatus();
+    } catch (SecurityException ignored) { }
+  }
+
+  private void requestNotificationPermissionIfNeeded() {
+    if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIFICATIONS);
+    }
+  }
+
   @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
     super.onActivityResult(requestCode, resultCode, data);
     if (requestCode != REQUEST_PROJECTION) return;
@@ -96,11 +135,15 @@ public class MainActivity extends Activity {
           .putExtra(FlickerMonitorService.EXTRA_RESULT_DATA, data);
       if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
       getSharedPreferences(PREF, 0).edit().putBoolean("capture_authorized", true).apply();
-      updateStatus();
     } else {
       getSharedPreferences(PREF, 0).edit().putBoolean("capture_authorized", false).apply();
-      updateStatus();
     }
+    updateStatus();
+  }
+
+  @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    if (requestCode == REQUEST_AUDIO && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) startAudioMonitor();
   }
 
   SeekBar bar(String label, int value, LinearLayout r) {
@@ -144,8 +187,10 @@ public class MainActivity extends Activity {
     SharedPreferences p = getSharedPreferences(PREF, 0);
     boolean auth = p.getBoolean("capture_authorized", false);
     boolean max = p.getBoolean("maximum_mitigation", false);
+    boolean hapticsReduced = p.getBoolean("haptics_reduced", false);
     status.setText("Accessibility: " + (SafetyAccessibilityService.isConnected() ? "connected" : "not connected")
         + "\nScreen capture authorization: " + (auth ? "granted" : "not granted")
-        + "\nMaximum mitigation: " + (max ? "ACTIVE" : "inactive"));
+        + "\nMaximum mitigation: " + (max ? "ACTIVE" : "inactive")
+        + "\nTouch haptics: " + (hapticsReduced ? "reduced" : "unchanged"));
   }
 }
