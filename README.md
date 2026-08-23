@@ -3,8 +3,13 @@
 Android epilepsy-safety filter project.
 
 ## Android beta
-The no-root Android implementation is under `android/EpilepsySafetyFilter/`.
+The rootless Android implementation is under `android/EpilepsySafetyFilter/`.
 
-It provides a configurable accessibility-based safety overlay and profiles for visual brightness/contrast reduction, motion reduction, and vibration sensitivity. It is designed as a risk-reduction accessibility tool, not a guarantee against seizures.
+The current beta includes MediaProjection screen monitoring, luminance-based temporal flicker detection, automatic maximum visual mitigation, service watchdog/failure states, configurable profiles, optional microphone loud-pulse mitigation, and optional system touch-haptics reduction.
 
-See `android/EpilepsySafetyFilter/docs/SAFETY.md` for the medical/safety model.
+It is designed as a risk-reduction accessibility tool, not a guarantee against seizures or a medically validated device.
+
+## Validation status
+CI validates source compilation, unit tests, and APK artifact creation. CI success is not equivalent to real-device safety validation. The earlier real-world strobe test failed, so real-device functional validation remains an explicit project gate.
+
+See `android/EpilepsySafetyFilter/docs/SAFETY.md` for the safety model and limitations.
