@@ -1,0 +1,37 @@
+name: Android Epilepsy Safety Filter
+on:
+  push:
+    paths:
+      - 'android/EpilepsySafetyFilter/**'
+      - '.github/workflows/android-epilepsy-filter.yml'
+  pull_request:
+    paths:
+      - 'android/EpilepsySafetyFilter/**'
+      - '.github/workflows/android-epilepsy-filter.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android/EpilepsySafetyFilter
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install SDK 35
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version 8.9
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: epilepsy-safety-filter-debug-apk
+          path: android/EpilepsySafetyFilter/app/build/outputs/apk/debug/*.apk
